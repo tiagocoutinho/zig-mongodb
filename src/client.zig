@@ -39,6 +39,35 @@ pub const DB = struct {
     fn collection(self: DB, name: []const u8) Collection {
         return .{ .db = self, .name = name };
     }
+    // return an interface exposing operations on mongodb databases
+    fn database(self: DB) []const u8 {
+        return self.name;
+    }
+
+    fn listCollections(self: DB) ![]const []const u8 {
+        var client = self.client;
+        const conn = try client.connection();
+        defer conn.release();
+
+        try protocol.write(client.allocator, conn.stream, bson.types.RawBson.document(
+            &.{
+                .{ "listCollections", bson.types.RawBson.int32(1) },
+                .{ "$db", bson.types.RawBson.string(self.name) },
+            },
+        ));
+
+        var doc = try protocol.read(client.allocator, conn.stream);
+        errdefer doc.deinit();
+
+        if (err.isErr(doc.value)) {
+            var reqErr = try err.extractErr(client.allocator, doc.value);
+            defer reqErr.deinit();
+            std.debug.print("error {s}\n", .{reqErr.value.errmsg});
+            return error.InvalidRequest;
+        }
+
+        return try doc.value.into(client.allocator, []const []const u8);
+    }
 };
 
 /// A Collection is an interface for interacting with a named mongodb collection of documents
@@ -409,6 +438,49 @@ pub const Client = struct {
         }
 
         return resp;
+    }
+
+    fn listDatabases(self: *@This()) ![]const []const u8 {
+        const conn = try self.connection();
+        defer conn.release();
+
+        try protocol.write(self.allocator, conn.stream, bson.types.RawBson.document(
+            &.{
+                .{ "listDatabases", bson.types.RawBson.int32(1) },
+            },
+        ));
+
+        var doc = try protocol.read(self.allocator, conn.stream);
+        errdefer doc.deinit();
+
+        if (err.isErr(doc.value)) {
+            var reqErr = try err.extractErr(self.allocator, doc.value);
+            defer reqErr.deinit();
+            std.debug.print("error {s}\n", .{reqErr.value.errmsg});
+            return error.InvalidRequest;
+        }
+
+        return try doc.value.into(self.allocator, []const []const u8);
+    }
+
+    // exec executes any raw bson
+    fn exec(self: *@This(), cmd: RawBson) !RawBson {
+        const conn = try self.connection();
+        defer conn.release();
+
+        try protocol.write(self.allocator, conn.stream, cmd);
+
+        var doc = try protocol.read(self.allocator, conn.stream);
+        errdefer doc.deinit();
+
+        if (err.isErr(doc.value)) {
+            var reqErr = try err.extractErr(self.allocator, doc.value);
+            defer reqErr.deinit();
+            std.debug.print("error {s}\n", .{reqErr.value.errmsg});
+            return error.InvalidRequest;
+        }
+
+        return try doc.value.into(self.allocator, RawBson);
     }
 };
 
