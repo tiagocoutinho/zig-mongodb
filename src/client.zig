@@ -44,7 +44,23 @@ pub const DB = struct {
         return self.name;
     }
 
-    fn listCollections(self: DB) ![]const []const u8 {
+    pub const CollectionName = struct {
+        cursor: struct {
+            id: i64,
+            ns: []const u8,
+            firstBatch: struct {
+                name: []const u8,
+            },
+        },
+        pub fn init(owned: Owned(CollectionName)) @This() {
+            return owned;
+        }
+        pub fn extractName(self: @This()) []const u8 {
+            return self.cursor.firstBatch.name;
+        }
+    };
+
+    pub fn listCollections(self: DB) !CollectionName {
         var client = self.client;
         const conn = try client.connection();
         defer conn.release();
@@ -52,6 +68,7 @@ pub const DB = struct {
         try protocol.write(client.allocator, conn.stream, bson.types.RawBson.document(
             &.{
                 .{ "listCollections", bson.types.RawBson.int32(1) },
+                .{ "nameOnly", bson.types.RawBson.boolean(true) },
                 .{ "$db", bson.types.RawBson.string(self.name) },
             },
         ));
@@ -66,7 +83,7 @@ pub const DB = struct {
             return error.InvalidRequest;
         }
 
-        return try doc.value.into(client.allocator, []const []const u8);
+        return CollectionName.init(try doc.value.into(client.allocator, CollectionName));
     }
 };
 
@@ -440,13 +457,39 @@ pub const Client = struct {
         return resp;
     }
 
-    fn listDatabases(self: *@This()) ![]const []const u8 {
+    pub const ListDatabasesResponse = struct {
+        const Database = struct {
+            name: []const u8,
+        };
+        const Databases = struct {
+            databases: []Database,
+        };
+        pub fn isErr(self: @This()) bool {
+            return self.ok != 1.0;
+        }
+        pub fn dbs(self: @This()) []const []const u8 {
+            var names = std.ArrayList([]const u8).init(self.client.allocator);
+            for (self.databases.databases) |d| names.appendSlice(d.name);
+            return names.toOwnedSlice();
+        }
+        fn init(owned: Owned(ListDatabasesResponse)) @This() {
+            return owned;
+        }
+        ok: f64,
+        databases: Databases,
+    };
+
+    // listDatabases enumerates all databases on the server
+    // SPEC: https://github.com/mongodb/specifications/blob/master/source/enumerate-databases/enumerate-databases.md
+    pub fn listDatabases(self: *@This()) !ListDatabasesResponse {
         const conn = try self.connection();
         defer conn.release();
 
         try protocol.write(self.allocator, conn.stream, bson.types.RawBson.document(
             &.{
                 .{ "listDatabases", bson.types.RawBson.int32(1) },
+                .{ "nameOnly", bson.types.RawBson.boolean(true) },
+                .{ "$db", bson.types.RawBson.string("admin") },
             },
         ));
 
@@ -459,12 +502,12 @@ pub const Client = struct {
             std.debug.print("error {s}\n", .{reqErr.value.errmsg});
             return error.InvalidRequest;
         }
-
-        return try doc.value.into(self.allocator, []const []const u8);
+        return ListDatabasesResponse.init(try doc.value.into(self.allocator, ListDatabasesResponse));
     }
 
-    // exec executes any raw bson
-    fn exec(self: *@This(), cmd: RawBson) !RawBson {
+    // runCommand implements `runCommand`
+    // SPEC: https://github.com/mongodb/specifications/blob/master/source/run-command/run-command.md
+    fn runCommand(self: *@This(), cmd: RawBson, comptime T: type) !Owned(T) {
         const conn = try self.connection();
         defer conn.release();
 
@@ -480,7 +523,7 @@ pub const Client = struct {
             return error.InvalidRequest;
         }
 
-        return try doc.value.into(self.allocator, RawBson);
+        return try doc.value.into(self.allocator, T);
     }
 };
 
@@ -565,26 +608,44 @@ test "find" {
     }
 }
 
-// https://www.mongodb.com/docs/manual/reference/command/hello/#syntax
-// test "hello" {
-//     const connectionStr = "mongodb://demo:omed@localhost/test";
-//     var client = Client.init(
-//         std.testing.allocator,
-//         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
-//     );
-//     defer client.deinit();
+test "listDatabases" {
+    const connectionStr = "mongodb://demo:omed@localhost/test";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
 
-//     if (client.hello()) |resp| {
-//         var vresp = resp;
-//         vresp.deinit();
-//     } else |e| {
-//         std.debug.print("error? {any}\n", .{e});
-//         switch (e) {
-//             error.ConnectionRefused => {
-//                 std.debug.print("mongodb not running {any}\n", .{e});
-//             },
-//             else => return e,
-//         }
-//         // catch errors until we set up a proper integration testing bootstrap on host
-//     }
-// }
+    if (client.listDatabases()) |resp| {
+        for (resp.dbs()) |db| {
+            std.debug.print("db {s}\n", .{db});
+        }
+    } else |e| {
+        std.debug.print("error? {any}\n", .{e});
+        switch (e) {
+            error.ConnectionRefused => {
+                std.debug.print("mongodb not running {any}\n", .{e});
+            },
+            else => return e,
+        }
+    }
+}
+
+test "listCollectionNames" {
+    const connectionStr = "mongodb://demo:omed@localhost/test";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
+
+    if (client.db("test").listCollections()) |resp| {
+        std.debug.print("collection {s}\n", .{resp.extractName()});
+    } else |e| {
+        switch (e) {
+            error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
+            else => return e,
+        }
+        // catch errors until we set up a proper integration testing bootstrap on host
+    }
+}
