@@ -119,9 +119,21 @@ pub const Mechansim = enum {
                     .sha1 => try serverFinal.validate(std.crypto.hash.Sha1, saltedPassword, clientFinal),
                     .sha256 => try serverFinal.validate(std.crypto.hash.sha2.Sha256, saltedPassword, clientFinal),
                 }
+                // end the authentication
+                try protocol.write(allocator, stream, clientFinal.empty_sasl());
+                var byeResp = try protocol.read(allocator, stream);
+                defer byeResp.deinit();
+
+                if (err.isErr(byeResp.value)) {
+                    var reqErr = try err.extractErr(allocator, byeResp.value);
+                    defer reqErr.deinit();
+                    std.debug.print("err {s}: {s}\n", .{ reqErr.value.codeName, reqErr.value.errmsg });
+                    return;
+                }
+
                 std.debug.print("validated auth\n", .{});
             },
-            else => |v| std.debug.print("auth not yet implemented for {any} mechansim", .{v}),
+            else => |v| std.debug.print("auth not yet implemented for {any} mechanism", .{v}),
         }
     }
 };
@@ -266,6 +278,10 @@ pub const Scram = enum {
 
         fn sasl(self: @This()) RawBson {
             return Sasl.cont(self.conversation_id, self.message, self.db);
+        }
+
+        fn empty_sasl(self: @This()) RawBson {
+            return Sasl.cont(self.conversation_id, "", self.db);
         }
     };
 

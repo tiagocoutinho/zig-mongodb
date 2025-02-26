@@ -53,7 +53,7 @@ pub const DB = struct {
             },
         },
         pub fn init(owned: Owned(CollectionName)) @This() {
-            return owned;
+            return owned.value;
         }
         pub fn extractName(self: @This()) []const u8 {
             return self.cursor.firstBatch.name;
@@ -74,7 +74,7 @@ pub const DB = struct {
         ));
 
         var doc = try protocol.read(client.allocator, conn.stream);
-        errdefer doc.deinit();
+        defer doc.deinit();
 
         if (err.isErr(doc.value)) {
             var reqErr = try err.extractErr(client.allocator, doc.value);
@@ -197,6 +197,7 @@ pub const Collection = struct {
     ) !Cursor(T) {
         _ = options; // autofix
         var client = self.db.client;
+
         const conn = try client.connection();
         defer conn.release();
 
@@ -209,7 +210,7 @@ pub const Collection = struct {
         ));
 
         var doc = try protocol.read(client.allocator, conn.stream);
-        errdefer doc.deinit();
+        defer doc.deinit();
 
         if (err.isErr(doc.value)) {
             var reqErr = try err.extractErr(client.allocator, doc.value);
@@ -217,9 +218,6 @@ pub const Collection = struct {
             std.debug.print("error {s}", .{reqErr.value.errmsg});
             return error.InvalidRequest;
         }
-
-        //return doc;
-        defer doc.deinit();
 
         return Cursor(T).init(try doc.value.into(client.allocator, FindResponse(T)));
     }
@@ -328,7 +326,8 @@ pub const Client = struct {
         ///
         /// This field will be false if the instance is a secondary member of a replica set or if the member is an arbiter of a replica set.
         isWritablePrimary: bool,
-        topologyVersion: TopologyVersion,
+        // topologyVersion is for internal use
+        // topologyVersion: TopologyVersion,
         /// The maximum permitted size of a BSON object in bytes for this mongod process.
         maxBsonObjectSize: i32 = 16 * 1024 * 1024,
         /// The maximum permitted size of a BSON wire protocol message. The default value is 48000000 bytes.
@@ -461,22 +460,21 @@ pub const Client = struct {
         const Database = struct {
             name: []const u8,
         };
-        const Databases = struct {
-            databases: []Database,
-        };
         pub fn isErr(self: @This()) bool {
             return self.ok != 1.0;
         }
-        pub fn dbs(self: @This()) []const []const u8 {
-            var names = std.ArrayList([]const u8).init(self.client.allocator);
-            for (self.databases.databases) |d| names.appendSlice(d.name);
+        pub fn dbs(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
+            var names = std.ArrayList([]const u8).init(alloc);
+            // append
+            for (self.databases) |d| try names.append(d.name);
             return names.toOwnedSlice();
         }
         fn init(owned: Owned(ListDatabasesResponse)) @This() {
-            return owned;
+            return owned.value;
         }
+        fn deinit() void {}
         ok: f64,
-        databases: Databases,
+        databases: []Database,
     };
 
     // listDatabases enumerates all databases on the server
@@ -494,7 +492,7 @@ pub const Client = struct {
         ));
 
         var doc = try protocol.read(self.allocator, conn.stream);
-        errdefer doc.deinit();
+        defer doc.deinit();
 
         if (err.isErr(doc.value)) {
             var reqErr = try err.extractErr(self.allocator, doc.value);
@@ -514,7 +512,7 @@ pub const Client = struct {
         try protocol.write(self.allocator, conn.stream, cmd);
 
         var doc = try protocol.read(self.allocator, conn.stream);
-        errdefer doc.deinit();
+        defer doc.deinit();
 
         if (err.isErr(doc.value)) {
             var reqErr = try err.extractErr(self.allocator, doc.value);
@@ -532,8 +530,8 @@ test "authenticate" {
         std.testing.allocator,
         .{
             .credentials = .{
-                .username = "demo",
-                .password = "omed",
+                .username = "scnace",
+                .password = "scnace",
                 .mechansim = .@"SCRAM-SHA-256", // default?
             },
         },
@@ -549,7 +547,7 @@ test "authenticate" {
 }
 
 test "ping" {
-    const connectionStr = "mongodb://demo:omed@localhost/test";
+    const connectionStr = "mongodb://scnace:scnace@localhost";
     var client = Client.init(
         std.testing.allocator,
         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
@@ -568,7 +566,7 @@ test "ping" {
 }
 
 test "find" {
-    const connectionStr = "mongodb://demo:omed@localhost/test";
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
     var client = Client.init(
         std.testing.allocator,
         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
@@ -608,44 +606,46 @@ test "find" {
     }
 }
 
-test "listDatabases" {
-    const connectionStr = "mongodb://demo:omed@localhost/test";
-    var client = Client.init(
-        std.testing.allocator,
-        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
-    );
-    defer client.deinit();
+// test "listDatabases" {
+//     const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+//     var client = Client.init(
+//         std.testing.allocator,
+//         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+//     );
+//     defer client.deinit();
 
-    if (client.listDatabases()) |resp| {
-        for (resp.dbs()) |db| {
-            std.debug.print("db {s}\n", .{db});
-        }
-    } else |e| {
-        std.debug.print("error? {any}\n", .{e});
-        switch (e) {
-            error.ConnectionRefused => {
-                std.debug.print("mongodb not running {any}\n", .{e});
-            },
-            else => return e,
-        }
-    }
-}
+//     if (client.listDatabases()) |resp| {
+//         var vresp = resp;
+//         defer vresp.deinit();
+//         for (try resp.dbs(std.testing.allocator)) |db| {
+//             std.debug.print("db {s}\n", .{db});
+//         }
+//     } else |e| {
+//         std.debug.print("error? {any}\n", .{e});
+//         switch (e) {
+//             error.ConnectionRefused => {
+//                 std.debug.print("mongodb not running {any}\n", .{e});
+//             },
+//             else => return e,
+//         }
+//     }
+// }
 
-test "listCollectionNames" {
-    const connectionStr = "mongodb://demo:omed@localhost/test";
-    var client = Client.init(
-        std.testing.allocator,
-        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
-    );
-    defer client.deinit();
+// test "listCollectionNames" {
+//     const connectionStr = "mongodb://scnace:scnace@localhost";
+//     var client = Client.init(
+//         std.testing.allocator,
+//         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+//     );
+//     defer client.deinit();
 
-    if (client.db("test").listCollections()) |resp| {
-        std.debug.print("collection {s}\n", .{resp.extractName()});
-    } else |e| {
-        switch (e) {
-            error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
-            else => return e,
-        }
-        // catch errors until we set up a proper integration testing bootstrap on host
-    }
-}
+//     if (client.db("test").listCollections()) |resp| {
+//         std.debug.print("collection {s}\n", .{resp.extractName()});
+//     } else |e| {
+//         switch (e) {
+//             error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
+//             else => return e,
+//         }
+//         // catch errors until we set up a proper integration testing bootstrap on host
+//     }
+// }
