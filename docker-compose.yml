@@ -8,8 +8,8 @@ services:
     image: mongo
     restart: always
     environment:
-      MONGO_INITDB_ROOT_USERNAME: demo
-      MONGO_INITDB_ROOT_PASSWORD: omed
+      MONGO_INITDB_ROOT_USERNAME: scnace
+      MONGO_INITDB_ROOT_PASSWORD: scnace
     ports:
       - 27017:27017
     command:

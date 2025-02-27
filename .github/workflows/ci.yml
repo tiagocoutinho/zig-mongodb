@@ -17,22 +17,18 @@ jobs:
           version: 0.13.0
       - name: fmt
         run: zig fmt --check .
-  examples:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
-      - name: Examples
-        run: zig build run-demo-example
   test:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    services:
+      mongo:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+        env:
+          MONGO_INITDB_ROOT_USERNAME: scnace
+          MONGO_INITDB_ROOT_PASSWORD: scnace
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,5 +37,28 @@ jobs:
           version: 0.13.0
       - name: Test
         run: zig build test --summary all
+  examples:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    services:
+      mongo:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+        env:
+          MONGO_INITDB_ROOT_USERNAME: scnace
+          MONGO_INITDB_ROOT_PASSWORD: scnace
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Examples
+        run: zig build run-demo-example
+        env:
+          MONGO_CONNECTION: mongodb://scnace:scnace@localhost:27017/test
+
 
 

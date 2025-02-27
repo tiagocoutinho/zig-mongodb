@@ -3,6 +3,7 @@ const ClientOptions = @import("option.zig").ClientOptions;
 const protocol = @import("protocol.zig");
 const bson = @import("bson");
 const RawBson = bson.types.RawBson;
+const Document = bson.types.Document;
 const auth = @import("auth.zig");
 const err = @import("err.zig");
 pub const Owned = @import("root.zig").Owned;
@@ -38,6 +39,73 @@ pub const DB = struct {
     /// return an interface exposing operations on mongodb collections
     fn collection(self: DB, name: []const u8) Collection {
         return .{ .db = self, .name = name };
+    }
+    // return an interface exposing operations on mongodb databases
+    fn database(self: DB) []const u8 {
+        return self.name;
+    }
+
+    pub const ListCollectionsRespWrapper = struct {
+        resp: Owned(ListCollectionResp),
+
+        pub fn init(owned: Owned(ListCollectionResp)) @This() {
+            return .{ .resp = owned };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.resp.deinit();
+        }
+
+        pub fn isErr(self: @This()) bool {
+            return self.resp.value.ok != 1.0;
+        }
+
+        pub fn getCols(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
+            var names = std.ArrayList([]const u8).init(alloc);
+            defer names.deinit();
+            // append
+            for (self.resp.value.cursor.firstBatch) |d| try names.append(d.name);
+            return names.toOwnedSlice();
+        }
+    };
+
+    pub const ListCollectionResp = struct {
+        const fb = struct {
+            name: []const u8,
+            type: []const u8,
+        };
+        cursor: struct {
+            id: i64,
+            ns: []const u8,
+            firstBatch: []fb,
+        },
+        ok: f64,
+    };
+
+    pub fn listCollections(self: DB) !ListCollectionsRespWrapper {
+        var client = self.client;
+        const conn = try client.connection();
+        defer conn.release();
+
+        try protocol.write(client.allocator, conn.stream, bson.types.RawBson.document(
+            &.{
+                .{ "listCollections", bson.types.RawBson.int32(1) },
+                .{ "nameOnly", bson.types.RawBson.boolean(true) },
+                .{ "$db", bson.types.RawBson.string(self.name) },
+            },
+        ));
+
+        var doc = try protocol.read(client.allocator, conn.stream);
+        defer doc.deinit();
+
+        if (err.isErr(doc.value)) {
+            var reqErr = try err.extractErr(client.allocator, doc.value);
+            defer reqErr.deinit();
+            std.debug.print("error {s}\n", .{reqErr.value.errmsg});
+            return error.InvalidRequest;
+        }
+
+        return ListCollectionsRespWrapper.init(try doc.value.into(client.allocator, ListCollectionResp));
     }
 };
 
@@ -151,6 +219,7 @@ pub const Collection = struct {
     ) !Cursor(T) {
         _ = options; // autofix
         var client = self.db.client;
+
         const conn = try client.connection();
         defer conn.release();
 
@@ -163,7 +232,7 @@ pub const Collection = struct {
         ));
 
         var doc = try protocol.read(client.allocator, conn.stream);
-        errdefer doc.deinit();
+        defer doc.deinit();
 
         if (err.isErr(doc.value)) {
             var reqErr = try err.extractErr(client.allocator, doc.value);
@@ -171,9 +240,6 @@ pub const Collection = struct {
             std.debug.print("error {s}", .{reqErr.value.errmsg});
             return error.InvalidRequest;
         }
-
-        //return doc;
-        defer doc.deinit();
 
         return Cursor(T).init(try doc.value.into(client.allocator, FindResponse(T)));
     }
@@ -282,7 +348,8 @@ pub const Client = struct {
         ///
         /// This field will be false if the instance is a secondary member of a replica set or if the member is an arbiter of a replica set.
         isWritablePrimary: bool,
-        topologyVersion: TopologyVersion,
+        // topologyVersion is for internal use
+        // topologyVersion: TopologyVersion,
         /// The maximum permitted size of a BSON object in bytes for this mongod process.
         maxBsonObjectSize: i32 = 16 * 1024 * 1024,
         /// The maximum permitted size of a BSON wire protocol message. The default value is 48000000 bytes.
@@ -410,6 +477,89 @@ pub const Client = struct {
 
         return resp;
     }
+
+    pub const ListDatabasesResponseWrapper = struct {
+        pub fn init(owned: Owned(ListDatabasesResponse)) @This() {
+            return .{ .resp = owned };
+        }
+        pub fn deinit(self: *@This()) void {
+            self.resp.deinit();
+        }
+
+        pub fn isErr(self: @This()) bool {
+            return self.resp.value.ok != 1.0;
+        }
+
+        pub fn get(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
+            return self.dbs(alloc);
+        }
+
+        fn dbs(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
+            var names = std.ArrayList([]const u8).init(alloc);
+            defer names.deinit();
+            // append
+            for (self.resp.value.databases) |d| try names.append(d.name);
+            return names.toOwnedSlice();
+        }
+
+        resp: Owned(ListDatabasesResponse),
+    };
+
+    pub const ListDatabasesResponse = struct {
+        const Database = struct {
+            name: []const u8,
+        };
+        ok: f64,
+        databases: []Database,
+    };
+
+    // listDatabases enumerates all databases on the server
+    // SPEC: https://github.com/mongodb/specifications/blob/master/source/enumerate-databases/enumerate-databases.md
+    pub fn listDatabases(self: *@This()) !ListDatabasesResponseWrapper {
+        const conn = try self.connection();
+        defer conn.release();
+
+        try protocol.write(self.allocator, conn.stream, bson.types.RawBson.document(
+            &.{
+                .{ "listDatabases", bson.types.RawBson.int32(1) },
+                .{ "nameOnly", bson.types.RawBson.boolean(true) },
+                .{ "$db", bson.types.RawBson.string("admin") },
+            },
+        ));
+
+        var doc = try protocol.read(self.allocator, conn.stream);
+        defer doc.deinit();
+
+        if (err.isErr(doc.value)) {
+            var reqErr = try err.extractErr(self.allocator, doc.value);
+            defer reqErr.deinit();
+            std.debug.print("error {s}\n", .{reqErr.value.errmsg});
+            return error.InvalidRequest;
+        }
+        return ListDatabasesResponseWrapper.init(try doc.value.into(self.allocator, ListDatabasesResponse));
+    }
+
+    // runCommand implements `runCommand`
+    // SPEC: https://github.com/mongodb/specifications/blob/master/source/run-command/run-command.md
+    // TODO(scnace): runCommandOptions
+    fn runCommand(self: *@This(), doc: []const Document.Element, comptime T: type) !Owned(T) {
+        const conn = try self.connection();
+        defer conn.release();
+
+        try protocol.write(self.allocator, conn.stream, bson.types.RawBson.document(doc));
+
+        var resp_doc = try protocol.read(self.allocator, conn.stream);
+        defer resp_doc.deinit();
+
+        if (err.isErr(resp_doc.value)) {
+            var reqErr = try err.extractErr(self.allocator, resp_doc.value);
+            defer reqErr.deinit();
+            std.debug.print("error {s}\n", .{reqErr.value.errmsg});
+            return error.InvalidRequest;
+        }
+
+        return try resp_doc.value.into(self.allocator, T);
+    }
 };
 
 test "authenticate" {
@@ -417,8 +567,8 @@ test "authenticate" {
         std.testing.allocator,
         .{
             .credentials = .{
-                .username = "demo",
-                .password = "omed",
+                .username = "scnace",
+                .password = "scnace",
                 .mechansim = .@"SCRAM-SHA-256", // default?
             },
         },
@@ -434,7 +584,7 @@ test "authenticate" {
 }
 
 test "ping" {
-    const connectionStr = "mongodb://demo:omed@localhost/test";
+    const connectionStr = "mongodb://scnace:scnace@localhost";
     var client = Client.init(
         std.testing.allocator,
         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
@@ -453,7 +603,7 @@ test "ping" {
 }
 
 test "find" {
-    const connectionStr = "mongodb://demo:omed@localhost/test";
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
     var client = Client.init(
         std.testing.allocator,
         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
@@ -493,26 +643,88 @@ test "find" {
     }
 }
 
-// https://www.mongodb.com/docs/manual/reference/command/hello/#syntax
-// test "hello" {
-//     const connectionStr = "mongodb://demo:omed@localhost/test";
-//     var client = Client.init(
-//         std.testing.allocator,
-//         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
-//     );
-//     defer client.deinit();
+test "listDatabases" {
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
 
-//     if (client.hello()) |resp| {
-//         var vresp = resp;
-//         vresp.deinit();
-//     } else |e| {
-//         std.debug.print("error? {any}\n", .{e});
-//         switch (e) {
-//             error.ConnectionRefused => {
-//                 std.debug.print("mongodb not running {any}\n", .{e});
-//             },
-//             else => return e,
-//         }
-//         // catch errors until we set up a proper integration testing bootstrap on host
-//     }
-// }
+    if (client.listDatabases()) |resp| {
+        var vresp = resp;
+        defer vresp.deinit();
+        if (vresp.isErr()) {
+            std.debug.print("error retrieving databases {any}\n", .{vresp});
+            return;
+        }
+        const databases = try vresp.get(std.testing.allocator);
+        defer std.testing.allocator.free(databases);
+        for (databases) |db| {
+            std.debug.print("db {s}\n", .{db});
+        }
+    } else |e| {
+        std.debug.print("error? {any}\n", .{e});
+        switch (e) {
+            error.ConnectionRefused => {
+                std.debug.print("mongodb not running {any}\n", .{e});
+            },
+            else => return e,
+        }
+    }
+}
+
+test "listCols" {
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
+
+    if (client.db("admin").listCollections()) |resp| {
+        var vresp = resp;
+        defer vresp.deinit();
+        if (vresp.isErr()) {
+            std.debug.print("error retrieving collections {any}\n", .{vresp});
+            return;
+        }
+        const cols = try vresp.getCols(std.testing.allocator);
+        defer std.testing.allocator.free(cols);
+        for (cols) |col| {
+            std.debug.print("collection {s}\n", .{col});
+        }
+    } else |e| {
+        switch (e) {
+            error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
+            else => return e,
+        }
+    }
+}
+
+test "runCommand" {
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
+
+    if (client.runCommand(
+        &.{
+            .{ "hello", bson.types.RawBson.int32(1) },
+            .{ "$db", bson.types.RawBson.string("admin") },
+        },
+        struct {
+            connectionId: i32,
+        },
+    )) |resp| {
+        var v_resp = resp;
+        defer v_resp.deinit();
+    } else |e| {
+        switch (e) {
+            error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
+            else => return e,
+        }
+    }
+}
