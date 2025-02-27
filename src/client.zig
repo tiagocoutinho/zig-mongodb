@@ -3,6 +3,7 @@ const ClientOptions = @import("option.zig").ClientOptions;
 const protocol = @import("protocol.zig");
 const bson = @import("bson");
 const RawBson = bson.types.RawBson;
+const Document = bson.types.Document;
 const auth = @import("auth.zig");
 const err = @import("err.zig");
 pub const Owned = @import("root.zig").Owned;
@@ -540,23 +541,24 @@ pub const Client = struct {
 
     // runCommand implements `runCommand`
     // SPEC: https://github.com/mongodb/specifications/blob/master/source/run-command/run-command.md
-    fn runCommand(self: *@This(), cmd: RawBson, comptime T: type) !Owned(T) {
+    // TODO(scnace): runCommandOptions
+    fn runCommand(self: *@This(), doc: []const Document.Element, comptime T: type) !Owned(T) {
         const conn = try self.connection();
         defer conn.release();
 
-        try protocol.write(self.allocator, conn.stream, cmd);
+        try protocol.write(self.allocator, conn.stream, bson.types.RawBson.document(doc));
 
-        var doc = try protocol.read(self.allocator, conn.stream);
-        defer doc.deinit();
+        var resp_doc = try protocol.read(self.allocator, conn.stream);
+        defer resp_doc.deinit();
 
-        if (err.isErr(doc.value)) {
-            var reqErr = try err.extractErr(self.allocator, doc.value);
+        if (err.isErr(resp_doc.value)) {
+            var reqErr = try err.extractErr(self.allocator, resp_doc.value);
             defer reqErr.deinit();
             std.debug.print("error {s}\n", .{reqErr.value.errmsg});
             return error.InvalidRequest;
         }
 
-        return try doc.value.into(self.allocator, T);
+        return try resp_doc.value.into(self.allocator, T);
     }
 };
 
@@ -692,6 +694,33 @@ test "listCols" {
         for (cols) |col| {
             std.debug.print("collection {s}\n", .{col});
         }
+    } else |e| {
+        switch (e) {
+            error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
+            else => return e,
+        }
+    }
+}
+
+test "runCommand" {
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
+
+    if (client.runCommand(
+        &.{
+            .{ "hello", bson.types.RawBson.int32(1) },
+            .{ "$db", bson.types.RawBson.string("admin") },
+        },
+        struct {
+            connectionId: i32,
+        },
+    )) |resp| {
+        var v_resp = resp;
+        defer v_resp.deinit();
     } else |e| {
         switch (e) {
             error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
