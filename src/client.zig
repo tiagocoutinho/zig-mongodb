@@ -44,23 +44,44 @@ pub const DB = struct {
         return self.name;
     }
 
-    pub const CollectionName = struct {
-        cursor: struct {
-            id: i64,
-            ns: []const u8,
-            firstBatch: struct {
-                name: []const u8,
-            },
-        },
-        pub fn init(owned: Owned(CollectionName)) @This() {
-            return owned.value;
+    pub const ListCollectionsRespWrapper = struct {
+        resp: Owned(ListCollectionResp),
+
+        pub fn init(owned: Owned(ListCollectionResp)) @This() {
+            return .{ .resp = owned };
         }
-        pub fn extractName(self: @This()) []const u8 {
-            return self.cursor.firstBatch.name;
+
+        pub fn deinit(self: *@This()) void {
+            self.resp.deinit();
+        }
+
+        pub fn isErr(self: @This()) bool {
+            return self.resp.value.ok != 1.0;
+        }
+
+        pub fn getCols(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
+            var names = std.ArrayList([]const u8).init(alloc);
+            defer names.deinit();
+            // append
+            for (self.resp.value.cursor.firstBatch) |d| try names.append(d.name);
+            return names.toOwnedSlice();
         }
     };
 
-    pub fn listCollections(self: DB) !CollectionName {
+    pub const ListCollectionResp = struct {
+        const fb = struct {
+            name: []const u8,
+            type: []const u8,
+        };
+        cursor: struct {
+            id: i64,
+            ns: []const u8,
+            firstBatch: []fb,
+        },
+        ok: f64,
+    };
+
+    pub fn listCollections(self: DB) !ListCollectionsRespWrapper {
         var client = self.client;
         const conn = try client.connection();
         defer conn.release();
@@ -83,7 +104,7 @@ pub const DB = struct {
             return error.InvalidRequest;
         }
 
-        return CollectionName.init(try doc.value.into(client.allocator, CollectionName));
+        return ListCollectionsRespWrapper.init(try doc.value.into(client.allocator, ListCollectionResp));
     }
 };
 
@@ -456,30 +477,44 @@ pub const Client = struct {
         return resp;
     }
 
+    pub const ListDatabasesResponseWrapper = struct {
+        pub fn init(owned: Owned(ListDatabasesResponse)) @This() {
+            return .{ .resp = owned };
+        }
+        pub fn deinit(self: *@This()) void {
+            self.resp.deinit();
+        }
+
+        pub fn isErr(self: @This()) bool {
+            return self.resp.value.ok != 1.0;
+        }
+
+        pub fn get(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
+            return self.dbs(alloc);
+        }
+
+        fn dbs(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
+            var names = std.ArrayList([]const u8).init(alloc);
+            defer names.deinit();
+            // append
+            for (self.resp.value.databases) |d| try names.append(d.name);
+            return names.toOwnedSlice();
+        }
+
+        resp: Owned(ListDatabasesResponse),
+    };
+
     pub const ListDatabasesResponse = struct {
         const Database = struct {
             name: []const u8,
         };
-        pub fn isErr(self: @This()) bool {
-            return self.ok != 1.0;
-        }
-        pub fn dbs(self: @This(), alloc: std.mem.Allocator) ![]const []const u8 {
-            var names = std.ArrayList([]const u8).init(alloc);
-            // append
-            for (self.databases) |d| try names.append(d.name);
-            return names.toOwnedSlice();
-        }
-        fn init(owned: Owned(ListDatabasesResponse)) @This() {
-            return owned.value;
-        }
-        fn deinit() void {}
         ok: f64,
         databases: []Database,
     };
 
     // listDatabases enumerates all databases on the server
     // SPEC: https://github.com/mongodb/specifications/blob/master/source/enumerate-databases/enumerate-databases.md
-    pub fn listDatabases(self: *@This()) !ListDatabasesResponse {
+    pub fn listDatabases(self: *@This()) !ListDatabasesResponseWrapper {
         const conn = try self.connection();
         defer conn.release();
 
@@ -500,7 +535,7 @@ pub const Client = struct {
             std.debug.print("error {s}\n", .{reqErr.value.errmsg});
             return error.InvalidRequest;
         }
-        return ListDatabasesResponse.init(try doc.value.into(self.allocator, ListDatabasesResponse));
+        return ListDatabasesResponseWrapper.init(try doc.value.into(self.allocator, ListDatabasesResponse));
     }
 
     // runCommand implements `runCommand`
@@ -606,46 +641,61 @@ test "find" {
     }
 }
 
-// test "listDatabases" {
-//     const connectionStr = "mongodb://scnace:scnace@localhost/admin";
-//     var client = Client.init(
-//         std.testing.allocator,
-//         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
-//     );
-//     defer client.deinit();
+test "listDatabases" {
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
 
-//     if (client.listDatabases()) |resp| {
-//         var vresp = resp;
-//         defer vresp.deinit();
-//         for (try resp.dbs(std.testing.allocator)) |db| {
-//             std.debug.print("db {s}\n", .{db});
-//         }
-//     } else |e| {
-//         std.debug.print("error? {any}\n", .{e});
-//         switch (e) {
-//             error.ConnectionRefused => {
-//                 std.debug.print("mongodb not running {any}\n", .{e});
-//             },
-//             else => return e,
-//         }
-//     }
-// }
+    if (client.listDatabases()) |resp| {
+        var vresp = resp;
+        defer vresp.deinit();
+        if (vresp.isErr()) {
+            std.debug.print("error retrieving databases {any}\n", .{vresp});
+            return;
+        }
+        const databases = try vresp.get(std.testing.allocator);
+        defer std.testing.allocator.free(databases);
+        for (databases) |db| {
+            std.debug.print("db {s}\n", .{db});
+        }
+    } else |e| {
+        std.debug.print("error? {any}\n", .{e});
+        switch (e) {
+            error.ConnectionRefused => {
+                std.debug.print("mongodb not running {any}\n", .{e});
+            },
+            else => return e,
+        }
+    }
+}
 
-// test "listCollectionNames" {
-//     const connectionStr = "mongodb://scnace:scnace@localhost";
-//     var client = Client.init(
-//         std.testing.allocator,
-//         try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
-//     );
-//     defer client.deinit();
+test "listCols" {
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
 
-//     if (client.db("test").listCollections()) |resp| {
-//         std.debug.print("collection {s}\n", .{resp.extractName()});
-//     } else |e| {
-//         switch (e) {
-//             error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
-//             else => return e,
-//         }
-//         // catch errors until we set up a proper integration testing bootstrap on host
-//     }
-// }
+    if (client.db("admin").listCollections()) |resp| {
+        var vresp = resp;
+        defer vresp.deinit();
+        if (vresp.isErr()) {
+            std.debug.print("error retrieving collections {any}\n", .{vresp});
+            return;
+        }
+        const cols = try vresp.getCols(std.testing.allocator);
+        defer std.testing.allocator.free(cols);
+        for (cols) |col| {
+            std.debug.print("collection {s}\n", .{col});
+        }
+    } else |e| {
+        switch (e) {
+            error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
+            else => return e,
+        }
+    }
+}
