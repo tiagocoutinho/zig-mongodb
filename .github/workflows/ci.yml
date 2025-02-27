@@ -58,7 +58,7 @@ jobs:
       - name: Examples
         run: zig build run-demo-example
         env:
-          MONGO_CONNECTION: mongodb://scnace:scnace@mongo:27017/test
+          MONGO_CONNECTION: mongodb://scnace:scnace@localhost:27017/test
 
 
 
