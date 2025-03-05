@@ -102,7 +102,7 @@ pub const DB = struct {
             var reqErr = try err.extractErr(client.allocator, doc.value);
             defer reqErr.deinit();
             std.debug.print("error {s}\n", .{reqErr.value.errmsg});
-            return error.InvalidRequest;
+            return reqErr.value.err();
         }
 
         return ListCollectionsRespWrapper.init(try doc.value.into(client.allocator, ListCollectionResp));
@@ -238,7 +238,7 @@ pub const Collection = struct {
             var reqErr = try err.extractErr(client.allocator, doc.value);
             defer reqErr.deinit();
             std.debug.print("error {s}", .{reqErr.value.errmsg});
-            return error.InvalidRequest;
+            return reqErr.value.err();
         }
 
         return Cursor(T).init(try doc.value.into(client.allocator, FindResponse(T)));
@@ -331,7 +331,7 @@ pub const Client = struct {
             var reqErr = try err.extractErr(self.allocator, doc.value);
             defer reqErr.deinit();
             std.debug.print("error: {s}\n", .{reqErr.value.errmsg});
-            return error.InvalidRequest;
+            return reqErr.value.err();
         }
 
         return try doc.value.into(self.allocator, PingResponse);
@@ -534,7 +534,7 @@ pub const Client = struct {
             var reqErr = try err.extractErr(self.allocator, doc.value);
             defer reqErr.deinit();
             std.debug.print("error {s}\n", .{reqErr.value.errmsg});
-            return error.InvalidRequest;
+            return reqErr.value.err();
         }
         return ListDatabasesResponseWrapper.init(try doc.value.into(self.allocator, ListDatabasesResponse));
     }
@@ -555,7 +555,7 @@ pub const Client = struct {
             var reqErr = try err.extractErr(self.allocator, resp_doc.value);
             defer reqErr.deinit();
             std.debug.print("error {s}\n", .{reqErr.value.errmsg});
-            return error.InvalidRequest;
+            return reqErr.value.err();
         }
 
         return try resp_doc.value.into(self.allocator, T);
@@ -725,6 +725,32 @@ test "runCommand" {
         switch (e) {
             error.ConnectionRefused => std.debug.print("mongodb not running {any}\n", .{e}),
             else => return e,
+        }
+    }
+}
+
+test "runBadCommand" {
+    const connectionStr = "mongodb://scnace:scnace@localhost/admin";
+    var client = Client.init(
+        std.testing.allocator,
+        try ClientOptions.fromConnectionString(std.testing.allocator, connectionStr),
+    );
+    defer client.deinit();
+
+    if (client.runCommand(
+        &.{
+            .{ "foo", bson.types.RawBson.int32(1) },
+            .{ "$db", bson.types.RawBson.string("admin") },
+        },
+        struct {
+            connectionId: i32,
+        },
+    )) |resp| {
+        var v_resp = resp;
+        defer v_resp.deinit();
+    } else |e| {
+        if (e != err.Error.MongoError.ErrCommandNotFound) {
+            @panic("Unexpected MongoDB error occurred");
         }
     }
 }

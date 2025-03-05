@@ -93,7 +93,11 @@ pub const Mechansim = enum {
 
                 var serverFirst = try Scram.ServerFirst.from(allocator, clientFirst.response.value);
                 defer serverFirst.deinit();
-                try serverFirst.validate(clientFirst.request.nonce);
+
+                serverFirst.validate(clientFirst.request.nonce) catch |e| {
+                    std.debug.print("Server validation error: {s}\n", .{@errorName(e)});
+                    return err.Error.MongoError.ErrUnauthorized;
+                };
 
                 const saltedPassword = try scram.saltedPassword(allocator, credentials.username, credentials.password, serverFirst.i, serverFirst.salt);
                 defer allocator.free(saltedPassword);
@@ -111,7 +115,7 @@ pub const Mechansim = enum {
                     var reqErr = try err.extractErr(allocator, clientFinalResp.value);
                     defer reqErr.deinit();
                     std.debug.print("err {s}: {s}\n", .{ reqErr.value.codeName, reqErr.value.errmsg });
-                    return;
+                    return reqErr.value.err();
                 }
 
                 var serverFinal = try Scram.ServerFinal.from(allocator, clientFinalResp.value);
