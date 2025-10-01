@@ -1,7 +1,8 @@
 .{
-    .name = "mongodb",
+    .name = .mongodb,
     .version = "0.1.0",
-    .minimum_zig_version = "0.13.0",
+    .fingerprint = 0xeffa6b88420e1a8c,
+    .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .bson = .{
             .url = "https://github.com/softprops/zig-bson/archive/refs/tags/v0.1.4.tar.gz",
